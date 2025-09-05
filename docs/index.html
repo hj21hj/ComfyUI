@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SD‑Turbo on WebGPU — GitHub Pages</title>
+  <meta name="description" content="Stable Diffusion Turbo in the browser (WebGPU). 100% front-end on GitHub Pages." />
+  <style>
+    :root { --bg:#0b0b0c; --fg:#f6f7fb; --muted:#a3a7b4; --card:#16181c; --accent:#4aa3ff; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Apple SD Gothic Neo, Noto Sans KR, Arial, sans-serif; background:var(--bg); color:var(--fg); }
+    header { max-width: 980px; margin: 28px auto 12px; padding: 0 16px; }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    .hint { color: var(--muted); font-size: 14px; }
+    .wrap { max-width: 980px; margin: 0 auto 60px; padding: 0 16px; display: grid; grid-template-columns: 1fr; gap: 16px; }
+    .card { background: var(--card); border: 1px solid #252932; border-radius: 16px; padding: 16px; }
+    label { font-weight: 600; font-size: 14px; }
+    input, select, button, textarea { width: 100%; background: #0f1116; color: var(--fg); border: 1px solid #2a2f39; border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+    input[type="number"] { max-width: 180px; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 10px; }
+    .row.cols-2 { grid-template-columns: 1fr 1fr; }
+    .row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .btn { background: var(--accent); border: none; color: #001326; font-weight: 700; cursor: pointer; }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#0e1116; padding:2px 6px; border-radius:8px; border:1px solid #2a2f39; font-size: 12px; color: var(--muted); }
+    #log { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #0f1116; border-radius: 12px; border: 1px dashed #2a2f39; padding: 10px; height: 200px; overflow: auto; color: #cbd5e1; }
+    canvas, img { max-width: 100%; border-radius: 16px; border: 1px solid #2a2f39; background:#0e1116 }
+    footer { text-align:center; color: var(--muted); font-size: 12px; margin: 24px 0 60px; }
+    .ok { color:#75f0a1; }
+    .warn { color:#fbbf24; }
+    .err { color:#fb7185; }
+    .tiny { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Stable Diffusion <span class="kbd">Turbo</span> — 100% 브라우저 (WebGPU)</h1>
+    <p class="hint">GitHub Pages에 그대로 올려서 쓰는 순수 프런트엔드 데모. 모델은 최초 100–1000MB 이상 다운로드될 수 있습니다(브라우저 캐시 저장).</p>
+    <p class="hint">⚠️ <b>Chrome/Edge 최신버전 + WebGPU 활성화 GPU</b> 권장. 모바일은 비권장. 회사 PC의 보안 정책/드라이버에 따라 동작이 제한될 수 있습니다.</p>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <div class="row">
+        <label for="prompt">프롬프트</label>
+        <textarea id="prompt" rows="3" placeholder="a tiny corgi astronaut on the moon, cinematic lighting, 35mm, high detail"></textarea>
+      </div>
+      <div class="row cols-3">
+        <div>
+          <label for="steps">steps</label>
+          <input id="steps" type="number" min="1" max="6" value="1" />
+          <div class="tiny">Turbo 계열은 1–4 step이 일반적입니다.</div>
+        </div>
+        <div>
+          <label for="seed">seed</label>
+          <input id="seed" type="number" value="0" />
+          <div class="tiny">0 은 무작위</div>
+        </div>
+        <div>
+          <label for="size">출력 크기</label>
+          <select id="size">
+            <option value="512x512" selected>512 × 512 (권장)</option>
+            <option value="640x640">640 × 640</option>
+            <option value="768x768">768 × 768 (고사양)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row cols-2">
+        <button id="btn-run" class="btn">이미지 생성</button>
+        <button id="btn-save" disabled>PNG 저장</button>
+      </div>
+
+      <div class="row">
+        <div id="env" class="hint"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>결과</h3>
+      <canvas id="canvas" width="512" height="512"></canvas>
+    </section>
+
+    <section class="card">
+      <h3>로그</h3>
+      <div id="log"></div>
+    </section>
+  </main>
+
+  <footer>Powered by <span class="kbd">WebGPU</span> + <span class="kbd">diffusers.js</span>. Models from Hugging Face Hub. This page does not send your prompts to a server.</footer>
+
+<script type="module">
+/**
+ * NOTE:
+ * This demo uses a third-party browser diffusion library via CDN:
+ *   @aislamov/diffusers.js  (WebGPU backend via onnxruntime-web)
+ * It fetches model assets from Hugging Face. Everything runs locally in your browser.
+ *
+ * If the CDN path changes, update the import URL below to the latest UMD/ESM build.
+ */
+const logEl = document.getElementById('log');
+const envEl = document.getElementById('env');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+const log = (msg, cls='') => {
+  const time = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = `[${time}] ${msg}`;
+  logEl.prepend(div);
+};
+
+// Basic environment checks
+const hasWebGPU = !!navigator.gpu;
+envEl.innerHTML = hasWebGPU
+  ? '✅ WebGPU 지원됨 — 최신 Chrome/Edge에서 실행 중'
+  : '❌ WebGPU 미지원 — chrome://flags 에서 "Unsafe WebGPU" 활성화 또는 최신 브라우저/드라이버 필요';
+
+// Import library from CDN
+let DiffusionPipeline;
+try {
+  // Try ESM build first
+  ({ DiffusionPipeline } = await import('https://cdn.jsdelivr.net/npm/@aislamov/diffusers.js/dist/diffusers.esm.js'));
+} catch (e) {
+  log('CDN ESM 로딩 실패 — UMD 폴백 시도', 'warn');
+  // Try UMD global as fallback
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/@aislamov/diffusers.js/dist/diffusers.min.js';
+    s.onload = () => resolve();
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  // eslint-disable-next-line no-undef
+  DiffusionPipeline = window.Diffusers?.DiffusionPipeline;
+}
+
+if (!DiffusionPipeline) {
+  log('diffusers.js 로드를 할 수 없습니다. CDN 경로를 업데이트 해주세요.', 'err');
+  throw new Error('diffusers.js not loaded');
+}
+
+const btnRun = document.getElementById('btn-run');
+const btnSave = document.getElementById('btn-save');
+
+let pipe = null;
+let lastImageData = null;
+
+// Choose a model: SD-Turbo (fast) or SD 2.1 (heavier).
+// You can switch to 'stabilityai/sdxl-turbo' if your GPU is strong.
+const MODELS = {
+  turbo: 'stabilityai/sd-turbo',
+  base21: 'aislamov/stable-diffusion-2-1-base-onnx'
+};
+let currentModel = 'turbo';
+
+async function ensurePipeline() {
+  if (pipe) return pipe;
+  log(`모델 불러오는 중: ${currentModel} (처음 300MB~1GB 다운로드 가능, 브라우저 캐시에 저장)`, 'warn');
+  // NOTE: The diffusers.js API downloads weights from Hugging Face
+  pipe = await DiffusionPipeline.fromPretrained(MODELS[currentModel], {
+    // Some forks require explicit 'revision' or 'dtype' options. Adjust if needed.
+    // revision: 'fp16',  // try removing if fails
+  });
+  log('모델 로드 완료', 'ok');
+  return pipe;
+}
+
+function parseSize(v) {
+  const [w, h] = v.split('x').map(Number);
+  return { width: w, height: h };
+}
+
+async function run() {
+  btnRun.disabled = true;
+  btnSave.disabled = true;
+  lastImageData = null;
+
+  try {
+    const prompt = document.getElementById('prompt').value.trim() || 'a tiny corgi astronaut on the moon, cinematic lighting, 35mm, high detail';
+    const steps = Math.max(1, Math.min(Number(document.getElementById('steps').value) || 1, 6));
+    const seed = Number(document.getElementById('seed').value) || 0;
+    const { width, height } = parseSize(document.getElementById('size').value);
+
+    canvas.width = width;
+    canvas.height = height;
+
+    const p = await ensurePipeline();
+
+    log(`이미지 생성 시작: steps=${steps}, seed=${seed}, size=${width}x${height}`);
+    const images = await p.run({
+      prompt,
+      numInferenceSteps: steps,
+      seed,
+      width,
+      height,
+    });
+
+    const img = images[0];
+    // Convert tensor to ImageData (assumes NCHW float 0-1)
+    const data = await img.toImageData({ tensorLayout: 'NCWH', format: 'RGB' });
+    ctx.putImageData(data, 0, 0);
+    lastImageData = data;
+    btnSave.disabled = false;
+    log('완료 ✅', 'ok');
+  } catch (err) {
+    console.error(err);
+    log(String(err?.message || err), 'err');
+    log('동작하지 않으면: ① 최신 Chrome/Edge ② WebGPU 활성 GPU ③ GPU 드라이버 업데이트 ④ 다른 모델 선택을 시도해 보세요.', 'warn');
+  } finally {
+    btnRun.disabled = false;
+  }
+}
+
+btnRun.addEventListener('click', run);
+
+btnSave.addEventListener('click', () => {
+  if (!lastImageData) return;
+  const tmp = document.createElement('canvas');
+  tmp.width = canvas.width;
+  tmp.height = canvas.height;
+  tmp.getContext('2d').putImageData(lastImageData, 0, 0);
+  const url = tmp.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'sd-turbo.png';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+
+</script>
+</body>
+</html>
