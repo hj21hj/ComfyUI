@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SD‑Turbo on WebGPU — GitHub Pages (UMD+Fallback)</title>
+  <meta name="description" content="Stable Diffusion Turbo in the browser (WebGPU). UMD build with CDN fallback for GitHub Pages." />
+  <style>
+    body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:0 16px;background:#0b0b0c;color:#f6f7fb}
+    h1{font-size:24px}
+    textarea,input,select,button{width:100%;padding:8px;border-radius:8px;border:1px solid #444;background:#111;color:#f6f7fb}
+    button{background:#4aa3ff;color:#001326;font-weight:bold;cursor:pointer}
+    canvas{max-width:100%;border:1px solid #333;border-radius:8px;background:#000;margin-top:12px}
+    #log{white-space:pre-wrap;font-family:monospace;background:#111;padding:8px;border-radius:8px;border:1px dashed #333;height:220px;overflow:auto;margin-top:12px}
+    .row{margin-top:10px}
+    .ok{color:#75f0a1}.warn{color:#fbbf24}.err{color:#fb7185}.muted{color:#a3a7b4}
+    .env{font-size:12px;color:#a3a7b4}
+  </style>
+  <script>
+    // Simple logger available before library loads
+    function __log(msg, cls) {
+      var el = document.getElementById('log');
+      if (!el) return console.log(msg);
+      var d = document.createElement('div');
+      if (cls) d.className = cls;
+      d.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+      el.prepend(d);
+    }
+    window.__log = __log;
+  </script>
+</head>
+<body>
+  <h1>Stable Diffusion Turbo — UMD + CDN Fallback</h1>
+  <p class="env">브라우저(WebGPU)에서 직접 실행. 최초 로드시 모델(수백 MB)이 다운로드되어 캐시에 저장됩니다.</p>
+  <div class="env" id="env"></div>
+  <div class="row"><label>프롬프트</label><textarea id="prompt" rows="3">a tiny corgi astronaut on the moon, cinematic lighting</textarea></div>
+  <div class="row"><label>steps</label><input id="steps" type="number" value="1" min="1" max="6"></div>
+  <div class="row"><label>seed</label><input id="seed" type="number" value="0"></div>
+  <div class="row"><label>출력 크기</label>
+    <select id="size">
+      <option value="512x512" selected>512x512</option>
+      <option value="640x640">640x640</option>
+      <option value="768x768">768x768</option>
+    </select>
+  </div>
+  <div class="row"><button id="btn-run">이미지 생성</button> <button id="btn-save" disabled>PNG 저장</button></div>
+  <canvas id="canvas" width="512" height="512"></canvas>
+  <div id="log"></div>
+
+<script>
+// Environment diagnostics
+(function() {
+  const hasWebGPU = !!navigator.gpu;
+  const ua = navigator.userAgent;
+  const gpuMsg = hasWebGPU ? '✅ WebGPU 지원됨' : '❌ WebGPU 미지원';
+  document.getElementById('env').textContent = gpuMsg + ' | UA: ' + ua;
+  if (!hasWebGPU) {
+    __log('WebGPU가 필요합니다. chrome://flags/#enable-unsafe-webgpu 활성화 후 재시작하세요.', 'warn');
+  }
+})();
+
+// Dynamically load UMD build with fallback
+(function loadDiffusersUMD() {
+  const primary = 'https://cdn.jsdelivr.net/npm/@aislamov/diffusers.js/dist/diffusers.min.js?v=1757048779';
+  const fallback = 'https://unpkg.com/@aislamov/diffusers.js/dist/diffusers.min.js?v=1757048779';
+  function attach(src, label) {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = function() { __log('라이브러리 로드 성공: ' + label, 'ok'); init(); };
+    s.onerror = function() { __log('라이브러리 로드 실패: ' + label, 'err'); if (src !== fallback) attach(fallback, 'unpkg'); };
+    document.head.appendChild(s);
+  }
+  __log('라이브러리 로딩 시작: jsDelivr', 'muted');
+  attach(primary, 'jsDelivr');
+})();
+
+let DiffusionPipeline = null;
+let pipe = null;
+let lastImageData = null;
+
+function parseSize(v){ const [w,h]=v.split('x').map(Number); return { width:w, height:h }; }
+
+async function ensurePipeline(){
+  if (pipe) return pipe;
+  if (!window.Diffusers || !window.Diffusers.DiffusionPipeline) {
+    __log('Diffusers 전역이 없습니다. CDN이 차단되었을 수 있습니다.', 'err');
+    throw new Error('diffusers UMD not available');
+  }
+  DiffusionPipeline = window.Diffusers.DiffusionPipeline;
+  __log('모델 로드 중... (처음은 용량이 큼)', 'warn');
+  pipe = await DiffusionPipeline.fromPretrained('stabilityai/sd-turbo');
+  __log('모델 로드 완료', 'ok');
+  return pipe;
+}
+
+async function run(){
+  const btnRun = document.getElementById('btn-run');
+  const btnSave = document.getElementById('btn-save');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  btnRun.disabled = true; btnSave.disabled = true;
+  try {
+    const prompt = document.getElementById('prompt').value.trim();
+    const steps = Math.max(1, Math.min(Number(document.getElementById('steps').value)||1, 6));
+    const seed = Number(document.getElementById('seed').value)||0;
+    const {width, height} = parseSize(document.getElementById('size').value);
+    canvas.width = width; canvas.height = height;
+
+    const p = await ensurePipeline();
+    __log('이미지 생성 시작: steps=' + steps + ', seed=' + seed + ', size=' + width + 'x' + height, 'muted');
+    const images = await p.run({ prompt, numInferenceSteps: steps, seed, width, height });
+    const img = images[0];
+    const data = await img.toImageData({ tensorLayout:'NCWH', format:'RGB' });
+    ctx.putImageData(data, 0, 0);
+    lastImageData = data; btnSave.disabled = false;
+    __log('완료 ✅', 'ok');
+  } catch (e) {
+    console.error(e);
+    __log('에러: ' + (e && e.message ? e.message : String(e)), 'err');
+    __log('네트워크(CDN 차단), WebGPU 비활성, 또는 브라우저/드라이버 호환성 문제일 수 있습니다.', 'warn');
+  } finally {
+    btnRun.disabled = false;
+  }
+}
+
+document.getElementById('btn-run').addEventListener('click', run);
+document.getElementById('btn-save').addEventListener('click', function(){
+  if (!lastImageData) return;
+  const canvas = document.createElement('canvas');
+  const src = document.getElementById('canvas');
+  canvas.width = src.width; canvas.height = src.height;
+  canvas.getContext('2d').putImageData(lastImageData, 0, 0);
+  const url = canvas.toDataURL('image/png');
+  const a = document.createElement('a'); a.href = url; a.download = 'sd-turbo.png'; a.click();
+});
+</script>
+</body>
+</html>
